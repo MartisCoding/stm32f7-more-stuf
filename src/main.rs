@@ -68,7 +68,7 @@ fn main() -> ! {
     let exti1 = ExtiInput::new(p.PC8, p.EXTI8, Down);
     let exti2 = ExtiInput::new(p.PC9, p.EXTI9, Down);
     
-    interrupt::USART1.set_priority(Priority::P7);
+    interrupt::USART1.set_priority(Priority::P5);
     let send_sp2 = EXECUTOR_ENC.start(interrupt::USART1);
     unwrap!(send_sp2.spawn(enc_task(exti1, exti2, enc_ch_send)));
     
@@ -143,7 +143,6 @@ async fn enc_task(
         }
         info!("Encoder task internal counter: {}", counter as i16);
         enc_ch_ref.send(counter as u16).await;
-        Timer::after_millis(10).await;
     }
 }
 #[task]
