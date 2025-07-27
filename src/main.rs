@@ -133,11 +133,11 @@ async fn enc_task(
         ).await;
         match res {
             Either::First(_) => {
-                exti2.wait_for_falling_edge().await;
+                exti2.wait_for_low().await;
                 counter += 1;
             }
             Either::Second(_) => {
-                exti1.wait_for_falling_edge().await;
+                exti1.wait_for_low().await;
                 counter -= 1;
             }
         }
