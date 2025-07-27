@@ -11,13 +11,13 @@ use cortex_m_rt::entry;
 use defmt::{error, info, unwrap};
 use embassy_executor::{task, Executor, InterruptExecutor};
 use embassy_futures::select::{select, Either};
-use embassy_stm32::adc::{Adc, Resolution, RingBufferedAdc, SampleTime, Sequence};
+use embassy_stm32::adc::{Adc, AdcChannel, Resolution, RingBufferedAdc, SampleTime, Sequence};
 use embassy_stm32::exti::ExtiInput;
 use embassy_stm32::gpio::Pull::Down;
 use embassy_stm32::{bind_interrupts, interrupt};
 use embassy_stm32::interrupt::{InterruptExt, Priority};
 use embassy_stm32::mode::Async;
-use embassy_stm32::peripherals::{ADC1, UART4};
+use embassy_stm32::peripherals::{ADC1, PA5, PA6, UART4};
 use embassy_stm32::usart::{Uart, InterruptHandler, Config};
 use embassy_sync::{channel::Channel, blocking_mutex::raw::CriticalSectionRawMutex};
 use embassy_sync::channel::{Receiver, Sender};
@@ -26,9 +26,6 @@ use static_cell::StaticCell;
 
 static ADC_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, (u16, u16), 10>> = StaticCell::new();
 static ENC_CHANNEL: StaticCell<Channel<CriticalSectionRawMutex, u16, 10>> = StaticCell::new();
-
-static DMA_BUFFER: StaticCell<[u16; DMA_BUFF_SIZE]> = StaticCell::new();
-const DMA_BUFF_SIZE: usize = 128;
 
 bind_interrupts!(struct Irqs {
     UART4 => InterruptHandler<UART4>;
@@ -41,7 +38,7 @@ static EXECUTOR_UART: StaticCell<Executor> = StaticCell::new();
 
 #[entry]
 fn main() -> ! {
-    let mut p = embassy_stm32::init(Default::default());
+    let p = embassy_stm32::init(Default::default());
     //ADC Channel from ADC_TASK to UART_TASK
     let adc_ch = ADC_CHANNEL.init(Channel::new());
     
@@ -56,14 +53,10 @@ fn main() -> ! {
 
     let mut adc = Adc::new(p.ADC1);
     adc.set_resolution(Resolution::BITS8);
-    let dma_buffer = DMA_BUFFER.init([0; DMA_BUFF_SIZE]);
-    let mut adc_ring = adc.into_ring_buffered(p.DMA2_CH0, dma_buffer);
-    adc_ring.set_sample_sequence(Sequence::One, &mut p.PA5, SampleTime::CYCLES480);
-    adc_ring.set_sample_sequence(Sequence::Two, &mut p.PA6, SampleTime::CYCLES480);
     
     interrupt::UART5.set_priority(Priority::P6);
     let send_sp1 = EXECUTOR_ADC.start(interrupt::UART5);
-    unwrap!(send_sp1.spawn(adc_task(adc_ring, adc_ch_send)));
+    unwrap!(send_sp1.spawn(adc_task(adc, adc_ch_send, p.PA5, p.PA6)));
 
     let exti1 = ExtiInput::new(p.PC8, p.EXTI8, Down);
     let exti2 = ExtiInput::new(p.PC9, p.EXTI9, Down);
@@ -101,20 +94,17 @@ unsafe fn USART1() {
 
 #[task]
 async fn adc_task(
-    mut adc_ring: RingBufferedAdc<'static, ADC1>,
-    adc_ch_ref: Sender<'static, CriticalSectionRawMutex, (u16, u16), 10>
+    mut adc: Adc<'static, ADC1>,
+    adc_ch_send: Sender<'static, CriticalSectionRawMutex, (u16, u16), 10>,
+    mut x_pin: PA5,
+    mut y_pin: PA6,
 ) {
-    let mut measures = [0u16; DMA_BUFF_SIZE / 2];
     info!("Starting knob task");
     loop {
-        match adc_ring.read(&mut measures).await {
-            Ok(_) => {
-                adc_ring.teardown_adc();
-                adc_ch_ref.send((measures[0], measures[1])).await
-            },
-            Err(e) => error!("Adc driver failed read with Error: {}", e),
-        }
-        Timer::after_millis(10).await;
+        let x = adc.blocking_read(&mut x_pin);
+        let y = adc.blocking_read(&mut y_pin);
+        adc_ch_send.send((x, y)).await;
+        Timer::after_millis(1).await;
     }
 }
 #[task]
@@ -123,7 +113,7 @@ async fn enc_task(
     mut exti2: ExtiInput<'static>, 
     enc_ch_ref: Sender<'static, CriticalSectionRawMutex, u16, 10>
 )  {
-    info!("Startin encoder task");
+    info!("Starting encoder task");
     let mut counter = 0i16;
     loop {
         info!("LOOP HEARTBEAT");
